@@ -1,0 +1,38 @@
+name: KeyFlow build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore project from single file
+        run: python3 keyflow_restore.py
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK packages
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Static QA
+        working-directory: KeyFlow
+        run: python3 tools/qa_static_check.py
+      - name: Build, unit tests, lint, generate locks and schema
+        working-directory: KeyFlow
+        run: bash tools/ci_prepare_metadata.sh
+      - name: Verify generated metadata
+        working-directory: KeyFlow
+        run: python3 tools/verify_reproducibility_metadata.py --require-complete
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyflow-results
+          path: |
+            KeyFlow/app/gradle.lockfile
+            KeyFlow/app/schemas
+            KeyFlow/app/build/outputs/apk/debug/*.apk
+            KeyFlow/app/build/reports
+            KeyFlow/app/build/test-results
+          if-no-files-found: warn
