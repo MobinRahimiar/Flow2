@@ -2,7 +2,7 @@ name: KeyFlow build
 on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -12,9 +12,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install SDK packages
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -eo pipefail
+          SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort | tail -1)"
+          yes | "$SDKM" --licenses >/dev/null || true
+          "$SDKM" 'platforms;android-35' 'build-tools;35.0.0'
       - name: Static QA
         working-directory: KeyFlow
         run: python3 tools/qa_static_check.py
