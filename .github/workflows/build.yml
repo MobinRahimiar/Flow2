@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Restore project from single file
-        run: python3 keyflow_restore_fix2.py
+        run: python3 keyflow_restore_fix3.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,6 +25,12 @@ jobs:
       - name: Build, unit tests, lint, generate locks and schema
         working-directory: KeyFlow
         run: bash tools/ci_prepare_metadata.sh
+      - name: Print lint errors
+        if: always()
+        working-directory: KeyFlow
+        run: |
+          f=app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt
+          if [ -f "$f" ]; then grep -E "^.*: Error: " "$f" | cut -c1-400 || true; else echo "no lint report"; fi
       - name: Verify generated metadata
         working-directory: KeyFlow
         run: python3 tools/verify_reproducibility_metadata.py --require-complete
