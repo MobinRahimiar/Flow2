@@ -10,8 +10,12 @@ concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 env:
   PROJECT_DIR: KeyFlow
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
@@ -25,6 +29,13 @@ jobs:
         run: |
           python3 create_keyflow.py .
           ls "$PROJECT_DIR"
+
+      - name: Read version
+        id: ver
+        run: |
+          VERSION="$(grep -oP 'versionName = "\K[^"]+' "$PROJECT_DIR/app/build.gradle.kts")"
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
 
       - name: Source-level QA
         run: cd "$PROJECT_DIR" && python3 tools/qa_static_check.py
@@ -54,6 +65,12 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
+      - name: Name the APK
+        run: |
+          cd "$PROJECT_DIR/app/build/outputs/apk/debug"
+          mv ./*.apk "KeyFlow-${{ steps.ver.outputs.name }}-${GITHUB_SHA::7}-debug.apk"
+          ls -l
+
       - name: Upload debug APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -61,6 +78,20 @@ jobs:
           name: keyflow-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Publish release for this version
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.ver.outputs.name }}"
+          APK="$(ls $PROJECT_DIR/app/build/outputs/apk/debug/*.apk | head -1)"
+          # Rebuilding the same version replaces that release; other versions are kept.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" "$APK" \
+            --title "KeyFlow ${{ steps.ver.outputs.name }}" \
+            --notes "Automatic debug build from commit ${GITHUB_SHA::7}" \
+            --prerelease --latest --target "$GITHUB_SHA"
 
       - name: Upload reports
         if: always()
