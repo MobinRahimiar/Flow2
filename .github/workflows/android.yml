@@ -26,8 +26,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Generate project from create_keyflow.py
+        shell: bash
         run: |
-          python3 create_keyflow.py .
+          GEN="$(find . -maxdepth 3 -iname 'create_keyflow*.py' -not -path './.git/*' | head -1)"
+          if [ -z "$GEN" ]; then
+            echo "::error::create_keyflow.py was not found in the repository. Files present:"
+            find . -maxdepth 3 -not -path './.git/*' | sort
+            exit 1
+          fi
+          echo "Using generator: $GEN"
+          python3 "$GEN" .
           ls "$PROJECT_DIR"
 
       - name: Read version
@@ -41,15 +49,13 @@ jobs:
         run: cd "$PROJECT_DIR" && python3 tools/qa_static_check.py
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: ${{ env.PROJECT_DIR }}
 
       - name: Install Android SDK packages
         shell: bash
@@ -86,12 +92,11 @@ jobs:
         run: |
           TAG="v${{ steps.ver.outputs.name }}"
           APK="$(ls $PROJECT_DIR/app/build/outputs/apk/debug/*.apk | head -1)"
-          # Rebuilding the same version replaces that release; other versions are kept.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" "$APK" \
             --title "KeyFlow ${{ steps.ver.outputs.name }}" \
             --notes "Automatic debug build from commit ${GITHUB_SHA::7}" \
-            --prerelease --latest --target "$GITHUB_SHA"
+            --prerelease --target "$GITHUB_SHA"
 
       - name: Upload reports
         if: always()
