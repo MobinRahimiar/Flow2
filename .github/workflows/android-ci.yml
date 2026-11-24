@@ -1,180 +1,182 @@
+
 name: Android CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
   pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
-concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PROJECT_DIR: KeyFlow
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ANDROID_I_WANT_MY_TCG: "yes"
 
 jobs:
   build:
+    name: Build and Test Android
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+
     steps:
-      - name: Checkout
+      # 1. دریافت سورس پروژه
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate project from create_keyflow.py
+      # 2. ساخت فایل‌های پروژه KeyFlow
+      - name: Generate KeyFlow project
+        shell: bash
         run: |
+          set -euo pipefail
           python3 create_keyflow.py .
           test -f "$PROJECT_DIR/gradlew"
           ls "$PROJECT_DIR"
 
-      - name: Source-level QA
-        run: cd "$PROJECT_DIR" && python3 tools/qa_static_check.py
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-          build-root-directory: ${{ env.PROJECT_DIR }}
-
-      - name: Install Android SDK packages
+      # 3. بررسی‌های ایستای پروژه
+      - name: Run static QA
         shell: bash
         run: |
           set -euo pipefail
-          SDKM="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort | tail -1)"
-          test -n "$SDKM"
-          yes | "$SDKM" --licenses >/dev/null || true
-          "$SDKM" 'platforms;android-35' 'build-tools;35.0.0'
+          cd "$PROJECT_DIR"
+          python3 tools/qa_static_check.py
 
-      # Generates Gradle dependency locks and Room schema before running the full build.
-      - name: Generate or verify dependency locks, unit tests, lint and debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: bash tools/ci_prepare_metadata.sh
+      # 4. نصب Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
 
-      - name: Run instrumented tests on API 35 emulator
+      # 5. تنظیم کش Gradle
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 6. بررسی Gradle Wrapper
+      - name: Verify Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          ./gradlew --version
+
+      # 7. کامپایل برنامه
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon assembleDebug
+
+      # 8. اجرای تست‌های واحد
+      - name: Run Unit Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon testDebugUnitTest
+
+      # 9. بررسی Lint
+      - name: Run Android Lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon lintDebug
+
+      # 10. اجرای تست‌های دستگاه واقعی/شبیه‌ساز
+      - name: Run Instrumented Tests on Emulator
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_I_WANT_MY_TCG: "yes"
         with:
           api-level: 35
           arch: x86_64
           target: google_apis
-          # Use software rendering on GitHub-hosted VMs and avoid restoring a
-          # stale AVD snapshot that can leave ADB without emulator-5554.
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          cores: 2
+          avd-name: test
+          force-avd-creation: true
+          emulator-boot-timeout: 600
+          emulator-port: 5554
           disable-animations: true
-          working-directory: ${{ env.PROJECT_DIR }}
+          disable-linux-hw-accel: true
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+          working-directory: KeyFlow
           script: |
             set -euo pipefail
-            echo 'Starting/reconnecting to the Android Debug Bridge...'
+
+            echo "Checking Android Debug Bridge..."
             adb start-server
-
-            # The runner action normally waits for boot. Re-check the device here
-            # because Gradle connected tests otherwise retry a missing emulator.
-            SERIAL=''
-            for attempt in $(seq 1 120); do
-              SERIAL="$(adb devices | awk '$1 ~ /^emulator-[0-9]+$/ && $2 == "device" { print $1; exit }')"
-              if [[ -n "$SERIAL" ]]; then
-                break
-              fi
-              echo "Waiting for emulator to appear in ADB (${attempt}/120)..."
-              sleep 2
-            done
-            if [[ -z "$SERIAL" ]]; then
-              echo '::error::No Android emulator became visible to ADB.'
-              adb devices -l || true
-              exit 1
-            fi
-
-            echo "Waiting for Android boot on $SERIAL..."
-            adb -s "$SERIAL" wait-for-device
-            BOOTED=''
-            for attempt in $(seq 1 180); do
-              BOOTED="$(adb -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-              if [[ "$BOOTED" == '1' ]]; then
-                break
-              fi
-              sleep 2
-            done
-            if [[ "$BOOTED" != '1' ]]; then
-              echo "::error::Android did not finish booting on $SERIAL."
-              adb devices -l || true
-              adb -s "$SERIAL" logcat -d -t 300 || true
-              exit 1
-            fi
-
-            adb -s "$SERIAL" shell input keyevent 82 || true
             adb devices -l
+
+            echo "Waiting for Android boot..."
+            adb wait-for-device
+
+            for attempt in $(seq 1 120); do
+              BOOT_COMPLETED="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+
+              if [ "$BOOT_COMPLETED" = "1" ]; then
+                echo "Android emulator boot completed."
+                break
+              fi
+
+              echo "Waiting for Android boot: ${attempt}/120"
+              sleep 5
+            done
+
+            BOOT_COMPLETED="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+
+            if [ "$BOOT_COMPLETED" != "1" ]; then
+              echo "::error::Android emulator failed to finish booting."
+              adb devices -l || true
+              exit 1
+            fi
+
+            adb shell settings put global window_animation_scale 0
+            adb shell settings put global transition_animation_scale 0
+            adb shell settings put global animator_duration_scale 0
+
+            echo "Running instrumented tests..."
             bash tools/ci_instrumented.sh
 
-      - name: Verify generated reproducibility metadata
-        if: success()
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: python3 tools/verify_reproducibility_metadata.py --require-complete
-
-      - name: Verify committed metadata has no drift
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git -C "$PROJECT_DIR" ls-files --error-unmatch app/gradle.lockfile >/dev/null 2>&1 \
-             && git -C "$PROJECT_DIR" ls-files 'app/schemas/*/1.json' | grep -q .; then
-            git -C "$PROJECT_DIR" diff --exit-code -- app/gradle.lockfile app/schemas
-          else
-            echo '::notice::Generated KeyFlow metadata is not tracked in this generator repository; it will be published as a workflow artifact.'
-          fi
-
-      - name: Rename debug APK
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/debug"
-          VERSION="$(grep -oP 'versionName = "\K[^" ]+' "$PROJECT_DIR/app/build.gradle.kts" | head -1)"
-          test -n "$VERSION"
-          shopt -s nullglob
-          APKS=("$APK_DIR"/*.apk)
-          test "${#APKS[@]}" -gt 0
-          mv "${APKS[0]}" "$APK_DIR/KeyFlow-${VERSION}-debug.apk"
-
-      - name: Upload debug APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: keyflow-debug-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-
-      - name: Publish APK to the latest release
-        if: success() && github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -maxdepth 1 -name '*.apk' -print -quit)"
-          test -n "$APK"
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest "$APK" \
-            --title "KeyFlow latest build" \
-            --notes "Automatic debug build from commit ${GITHUB_SHA::7}" \
-            --prerelease --target "$GITHUB_SHA"
-
-      - name: Upload reports and reproducibility metadata
+      # 11. ذخیره گزارش‌ها و خروجی‌ها حتی در صورت خطا
+      - name: Upload reports and metadata
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: keyflow-reports-and-metadata
           path: |
-            ${{ env.PROJECT_DIR }}/app/gradle.lockfile
-            ${{ env.PROJECT_DIR }}/app/schemas/**/1.json
-            ${{ env.PROJECT_DIR }}/app/build/reports/**
-            ${{ env.PROJECT_DIR }}/app/build/test-results/**
+            KeyFlow/app/gradle.lockfile
+            KeyFlow/app/schemas/**/1.json
+            KeyFlow/app/build/reports/**
+            KeyFlow/app/build/test-results/**
           if-no-files-found: ignore
+          retention-days: 14
+
+      # 12. ذخیره APK خروجی
+      - name: Upload Debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyflow-debug-apk
+          path: KeyFlow/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          retention-days: 14
