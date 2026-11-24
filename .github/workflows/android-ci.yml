@@ -1,50 +1,41 @@
-
 name: Android CI
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Do not cancel an in-progress release/build workflow just because another
+# commit arrived on the same branch; keep each run's diagnostics intact.
 concurrency:
-  group: android-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: keyflow-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PROJECT_DIR: KeyFlow
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  ANDROID_I_WANT_MY_TCG: "yes"
 
 jobs:
-  build:
-    name: Build and Test Android
+  build-test-lint:
+    name: Build, unit tests and lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-
     steps:
-      # 1. دریافت سورس پروژه
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. ساخت فایل‌های پروژه KeyFlow
       - name: Generate KeyFlow project
         shell: bash
         run: |
           set -euo pipefail
           python3 create_keyflow.py .
           test -f "$PROJECT_DIR/gradlew"
-          ls "$PROJECT_DIR"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
 
-      # 3. بررسی‌های ایستای پروژه
       - name: Run static QA
         shell: bash
         run: |
@@ -52,19 +43,17 @@ jobs:
           cd "$PROJECT_DIR"
           python3 tools/qa_static_check.py
 
-      # 4. نصب Java 17
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
-          cache: gradle
+          java-version: '17'
 
-      # 5. تنظیم کش Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: ${{ env.PROJECT_DIR }}
 
-      # 6. بررسی Gradle Wrapper
       - name: Verify Gradle Wrapper
         shell: bash
         run: |
@@ -73,96 +62,29 @@ jobs:
           chmod +x gradlew
           ./gradlew --version
 
-      # 7. کامپایل برنامه
-      - name: Build Debug APK
+      - name: Generate or verify dependency locks and Room schema
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: bash tools/ci_prepare_metadata.sh
+
+      - name: Run strict unit tests, lint and debug build
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon assembleDebug
+          bash tools/ci_gradle.sh :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
-      # 8. اجرای تست‌های واحد
-      - name: Run Unit Tests
+      - name: Verify generated reproducibility metadata
+        if: success()
         shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon testDebugUnitTest
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python3 tools/verify_reproducibility_metadata.py --require-complete
 
-      # 9. بررسی Lint
-      - name: Run Android Lint
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon lintDebug
-
-      # 10. اجرای تست‌های دستگاه واقعی/شبیه‌ساز
-      - name: Run Instrumented Tests on Emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          ANDROID_I_WANT_MY_TCG: "yes"
-        with:
-          api-level: 35
-          arch: x86_64
-          target: google_apis
-          cores: 2
-          avd-name: test
-          force-avd-creation: true
-          emulator-boot-timeout: 600
-          emulator-port: 5554
-          disable-animations: true
-          disable-linux-hw-accel: false
-          emulator-options: >-
-            -no-window
-            -gpu swiftshader_indirect
-            -no-snapshot
-            -noaudio
-            -no-boot-anim
-          working-directory: KeyFlow
-          script: |
-            set -euo pipefail
-
-            echo "Checking Android Debug Bridge..."
-            adb start-server
-            adb devices -l
-
-            echo "Waiting for Android boot..."
-            adb wait-for-device
-
-            for attempt in $(seq 1 120); do
-              BOOT_COMPLETED="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-
-              if [ "$BOOT_COMPLETED" = "1" ]; then
-                echo "Android emulator boot completed."
-                break
-              fi
-
-              echo "Waiting for Android boot: ${attempt}/120"
-              sleep 5
-            done
-
-            BOOT_COMPLETED="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-
-            if [ "$BOOT_COMPLETED" != "1" ]; then
-              echo "::error::Android emulator failed to finish booting."
-              adb devices -l || true
-              exit 1
-            fi
-
-            adb shell settings put global window_animation_scale 0
-            adb shell settings put global transition_animation_scale 0
-            adb shell settings put global animator_duration_scale 0
-
-            echo "Running instrumented tests..."
-            bash tools/ci_instrumented.sh
-
-      # 11. ذخیره گزارش‌ها و خروجی‌ها حتی در صورت خطا
       - name: Upload reports and metadata
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: keyflow-reports-and-metadata
+          name: keyflow-build-reports
           path: |
             KeyFlow/app/gradle.lockfile
             KeyFlow/app/schemas/**/1.json
@@ -171,12 +93,64 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # 12. ذخیره APK خروجی
       - name: Upload Debug APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: keyflow-debug-apk
           path: KeyFlow/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 14
+
+  instrumented-tests:
+    name: Instrumented tests (hardware-accelerated macOS emulator)
+    # The supplied log proves the Ubuntu runner has no hardware acceleration;
+    # Android x86_64 emulator exits before ADB becomes available there.
+    runs-on: macos-14
+    timeout-minutes: 75
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate KeyFlow project
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 create_keyflow.py .
+          test -f "$PROJECT_DIR/gradlew"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: ${{ env.PROJECT_DIR }}
+
+      - name: Run instrumented tests on accelerated emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          cores: 2
+          avd-name: keyflow-ci
+          force-avd-creation: true
+          emulator-boot-timeout: 600
+          disable-animations: true
+          working-directory: KeyFlow
+          script: bash tools/ci_instrumented.sh
+
+      - name: Upload instrumentation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyflow-instrumented-reports
+          path: |
+            KeyFlow/app/build/reports/**
+            KeyFlow/app/build/test-results/**
+          if-no-files-found: ignore
           retention-days: 14
