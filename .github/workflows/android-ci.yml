@@ -112,7 +112,7 @@ jobs:
           emulator-boot-timeout: 600
           emulator-port: 5554
           disable-animations: true
-          disable-linux-hw-accel: true
+          disable-linux-hw-accel: false
           emulator-options: >-
             -no-window
             -gpu swiftshader_indirect
