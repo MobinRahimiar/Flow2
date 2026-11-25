@@ -1,17 +1,18 @@
+
 name: Android CI
 
 on:
   push:
     branches: [main, master]
+
   pull_request:
     branches: [main, master]
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Do not cancel an in-progress release/build workflow just because another
-# commit arrived on the same branch; keep each run's diagnostics intact.
 concurrency:
   group: keyflow-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -21,18 +22,26 @@ env:
 
 jobs:
   build-test-lint:
-    name: Build, unit tests and lint
+    name: Build, Unit Tests and Lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
       - name: Generate KeyFlow project
         shell: bash
         run: |
           set -euo pipefail
+
           python3 create_keyflow.py .
+
           test -f "$PROJECT_DIR/gradlew"
           test -f "$PROJECT_DIR/app/build.gradle.kts"
 
@@ -59,26 +68,35 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+
           chmod +x gradlew
           ./gradlew --version
 
       - name: Generate or verify dependency locks and Room schema
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
-        run: bash tools/ci_prepare_metadata.sh
+        run: |
+          set -euo pipefail
+          bash tools/ci_prepare_metadata.sh
 
-      - name: Run strict unit tests, lint and debug build
+      - name: Run Unit Tests, Lint and Debug Build
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-          bash tools/ci_gradle.sh :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
-      - name: Verify generated reproducibility metadata
+          bash tools/ci_gradle.sh \
+            :app:testDebugUnitTest \
+            :app:lintDebug \
+            :app:assembleDebug
+
+      - name: Verify reproducibility metadata
         if: success()
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
-        run: python3 tools/verify_reproducibility_metadata.py --require-complete
+        run: |
+          set -euo pipefail
+          python3 tools/verify_reproducibility_metadata.py --require-complete
 
       - name: Upload reports and metadata
         if: always()
@@ -103,21 +121,29 @@ jobs:
           retention-days: 14
 
   instrumented-tests:
-    name: Instrumented tests (hardware-accelerated macOS emulator)
-    # The supplied log proves the Ubuntu runner has no hardware acceleration;
-    # Android x86_64 emulator exits before ADB becomes available there.
+    name: Instrumented Tests - Android Emulator
+    needs: build-test-lint
     runs-on: macos-14
     timeout-minutes: 75
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
       - name: Generate KeyFlow project
         shell: bash
         run: |
           set -euo pipefail
+
           python3 create_keyflow.py .
+
           test -f "$PROJECT_DIR/gradlew"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -130,7 +156,16 @@ jobs:
         with:
           build-root-directory: ${{ env.PROJECT_DIR }}
 
-      - name: Run instrumented tests on accelerated emulator
+      - name: Prepare Gradle metadata
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+          bash tools/ci_prepare_metadata.sh
+
+      - name: Run instrumented tests on Android Emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
