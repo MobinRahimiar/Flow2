@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 create_keyflow_Telecom_FakeCall.py .
+          python3 create_keyflow.py .
           test -f "$PROJECT_DIR/gradlew"
           test -f "$PROJECT_DIR/app/build.gradle.kts"
           test -f "$PROJECT_DIR/tools/ci_prepare_metadata.sh"
